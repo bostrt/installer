@@ -4,14 +4,17 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/golang/mock/gomock"
-	"github.com/stretchr/testify/assert"
 	"github.com/vmware/govmomi/object"
+	vim25types "github.com/vmware/govmomi/vim25/types"
 
-	"github.com/openshift/installer/pkg/asset/installconfig/vsphere/mock"
+	"github.com/golang/mock/gomock"
 	"github.com/openshift/installer/pkg/ipnet"
 	"github.com/openshift/installer/pkg/types"
 	"github.com/openshift/installer/pkg/types/vsphere"
+	"github.com/openshift/installer/pkg/types/vsphere/mock"
+	"github.com/stretchr/testify/assert"
+
+	vspheretypes "github.com/openshift/installer/pkg/types/vsphere"
 )
 
 var (
@@ -31,6 +34,7 @@ func validIPIInstallConfig() *types.InstallConfig {
 				Cluster:          "valid_cluster",
 				Datacenter:       "valid_dc",
 				DefaultDatastore: "valid_ds",
+				Folder:           "valid_folder",
 				Network:          "valid_network",
 				Password:         "valid_password",
 				Username:         "valid_username",
@@ -46,7 +50,7 @@ func TestValidate(t *testing.T) {
 	tests := []struct {
 		name             string
 		installConfig    *types.InstallConfig
-		validationMethod func(Finder, *types.InstallConfig) error
+		validationMethod func(vsphere.Finder, vspheretypes.NetworkIdentifier, *types.InstallConfig) error
 		expectErr        string
 	}{{
 		name:             "valid IPI install config",
@@ -62,24 +66,6 @@ func TestValidate(t *testing.T) {
 		validationMethod: validateProvisioning,
 		expectErr:        `^platform\.vsphere\.network: Required value: must specify the network$`,
 	}, {
-		name: "invalid IPI - invalid datacenter",
-		installConfig: func() *types.InstallConfig {
-			c := validIPIInstallConfig()
-			c.Platform.VSphere.Datacenter = "invalid_dc"
-			return c
-		}(),
-		validationMethod: validateProvisioning,
-		expectErr:        `^platform.vsphere.network: Invalid value: "invalid_dc": 404$`,
-	}, {
-		name: "invalid IPI - invalid network",
-		installConfig: func() *types.InstallConfig {
-			c := validIPIInstallConfig()
-			c.Platform.VSphere.Network = "invalid_network"
-			return c
-		}(),
-		validationMethod: validateProvisioning,
-		expectErr:        `^platform.vsphere.network: Invalid value: "invalid_network": unable to find network provided$`,
-	}, {
 		name: "invalid IPI - no cluster",
 		installConfig: func() *types.InstallConfig {
 			c := validIPIInstallConfig()
@@ -89,18 +75,40 @@ func TestValidate(t *testing.T) {
 		validationMethod: validateProvisioning,
 		expectErr:        `^platform\.vsphere\.cluster: Required value: must specify the cluster$`,
 	}}
+
+	ccr := object.ClusterComputeResource{}
+	ccr.InventoryPath = "valid_cluster"
+
+	networks := []vim25types.ManagedObjectReference{
+		{
+			Value: "valid",
+		},
+		{
+			Value: "other",
+		},
+	}
+
 	mockCtrl := gomock.NewController(t)
 	defer mockCtrl.Finish()
 
 	vsphereClient := mock.NewMockFinder(mockCtrl)
+	vsphereClient.EXPECT().Folder(gomock.Any(), "valid_folder").AnyTimes().Return(nil, nil)
+	networkIdentifier := mock.NewMockNetworkIdentifier(mockCtrl)
+
 	vsphereClient.EXPECT().Datacenter(gomock.Any(), "./valid_dc").Return(&object.Datacenter{Common: object.Common{InventoryPath: "valid_dc"}}, nil).AnyTimes()
 	vsphereClient.EXPECT().Datacenter(gomock.Any(), gomock.Not("./valid_dc")).Return(nil, fmt.Errorf("404")).AnyTimes()
+	vsphereClient.EXPECT().ClusterComputeResource(gomock.Any(), "/valid_dc/host/valid_cluster").Return(&ccr, nil).AnyTimes()
+	vsphereClient.EXPECT().ClusterComputeResource(gomock.Any(), gomock.Not("/valid_dc/host/valid_cluster")).Return(nil, fmt.Errorf("404")).AnyTimes()
 
-	vsphereClient.EXPECT().Network(gomock.Any(), "valid_dc/network/valid_network").Return(nil, nil).AnyTimes()
-	vsphereClient.EXPECT().Network(gomock.Any(), gomock.Not("valid_dc/network/valid_network")).Return(nil, fmt.Errorf("404")).AnyTimes()
+	networkIdentifier.EXPECT().GetNetworks(gomock.Any(), &ccr).Return(networks, nil).AnyTimes()
+	networkIdentifier.EXPECT().GetNetworkName(gomock.Any(), networks[0]).Return("valid_network", nil).AnyTimes()
+	networkIdentifier.EXPECT().GetNetworkName(gomock.Any(), networks[1]).Return("other_network", nil).AnyTimes()
+	networkIdentifier.EXPECT().GetNetworkName(gomock.Any(), gomock.Not(networks[0])).Return("", fmt.Errorf("404")).AnyTimes()
+	networkIdentifier.EXPECT().GetNetworkName(gomock.Any(), gomock.Not(networks[1])).Return("", fmt.Errorf("404")).AnyTimes()
+
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			err := test.validationMethod(vsphereClient, test.installConfig)
+			err := test.validationMethod(vsphereClient, networkIdentifier, test.installConfig)
 			if test.expectErr == "" {
 				assert.NoError(t, err)
 			} else {

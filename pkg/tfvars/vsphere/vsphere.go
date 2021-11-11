@@ -1,6 +1,7 @@
 package vsphere
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 
@@ -56,6 +57,25 @@ func TFVars(sources TFVarsSources) ([]byte, error) {
 	// /<datacenter>/vm/<folder_path> so we can split on "vm/".
 	folderRelPath := strings.SplitAfterN(controlPlaneConfig.Workspace.Folder, "vm/", 2)[1]
 
+	// Must use the Managed Object ID for a port group (e.g. dvportgroup-5258)
+	// instead of the name since port group names aren't always unique in vSphere.
+	// https://bugzilla.redhat.com/show_bug.cgi?id=1918005
+	vim25Client, _, err := vsphere.CreateVSphereClients(context.TODO(),
+		controlPlaneConfig.Workspace.Server,
+		sources.Username,
+		sources.Password)
+	finder := vsphere.NewFinder(vim25Client)
+	networkUtil := vsphere.NewNetworkUtil(vim25Client)
+	networkID, err := vsphere.GetNetworkMoID(context.TODO(),
+		networkUtil,
+		finder,
+		controlPlaneConfig.Workspace.Datacenter,
+		sources.Cluster,
+		controlPlaneConfig.Network.Devices[0].NetworkName)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to get vSphere network ID")
+	}
+
 	cfg := &config{
 		VSphereURL:        controlPlaneConfig.Workspace.Server,
 		VSphereUsername:   sources.Username,
@@ -69,7 +89,7 @@ func TFVars(sources TFVarsSources) ([]byte, error) {
 		Datacenter:        controlPlaneConfig.Workspace.Datacenter,
 		Datastore:         controlPlaneConfig.Workspace.Datastore,
 		Folder:            folderRelPath,
-		Network:           controlPlaneConfig.Network.Devices[0].NetworkName,
+		Network:           networkID,
 		Template:          controlPlaneConfig.Template,
 		OvaFilePath:       cachedImage,
 		PreexistingFolder: sources.PreexistingFolder,
